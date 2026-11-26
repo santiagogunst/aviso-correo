@@ -45,6 +45,19 @@ def resumen(raw):
     return de, asunto, hora
 
 
+def leer_estado():
+    try:
+        return json.load(open(ESTADO))
+    except Exception:
+        return {}
+
+
+def guardar(**cambios):
+    est = leer_estado()
+    est.update(cambios)
+    json.dump(est, open(ESTADO, "w"))
+
+
 def main():
     m = imaplib.IMAP4(SERVIDOR, PUERTO, timeout=40)
     m.starttls(tls())
@@ -52,13 +65,10 @@ def main():
     m.select("INBOX", readonly=True)
     validez = m.response("UIDVALIDITY")[1][0].decode()
     uids = [int(x) for x in (m.uid("search", None, "ALL")[1][0] or b"").split()]
-    try:
-        est = json.load(open(ESTADO))
-    except Exception:
-        est = {}
+    est = leer_estado()
     ultimo = est.get("ultimo_uid")
     if ultimo is None or est.get("uidvalidity") != validez:
-        json.dump({"ultimo_uid": max(uids, default=0), "uidvalidity": validez}, open(ESTADO, "w"))
+        guardar(ultimo_uid=max(uids, default=0), uidvalidity=validez)
         telegram("✅ Aviso de correo activado. Desde ahora te aviso de cada mail nuevo de la casilla.")
         m.logout(); return
     nuevos = [u for u in uids if u > ultimo]
@@ -72,11 +82,36 @@ def main():
         raw = next((p[1] for p in d if isinstance(p, tuple)), b"")
         de, asunto, hora = resumen(raw)
         telegram(f"📧 {de}\n{asunto}\n🕐 {hora}")
-        json.dump({"ultimo_uid": u, "uidvalidity": validez}, open(ESTADO, "w"))
+        guardar(ultimo_uid=u, uidvalidity=validez)
     if omitidos:
-        json.dump({"ultimo_uid": nuevos[-1], "uidvalidity": validez}, open(ESTADO, "w"))
+        guardar(ultimo_uid=nuevos[-1], uidvalidity=validez)
     m.logout()
 
 
+FALLAS_PARA_AVISAR = 3  # ~6 min seguidos fallando, para no avisar por un corte de un instante
+
+
+def vigilar():
+    """Corre main(); si falla varias veces seguidas avisa una vez, y avisa cuando se recupera."""
+    fallas = leer_estado().get("fallas", 0)
+    try:
+        main()
+    except Exception as e:
+        fallas += 1
+        guardar(fallas=fallas)
+        if fallas == FALLAS_PARA_AVISAR:
+            try:
+                telegram("⚠️ El aviso de correo está fallando: no pude revisar la casilla.\n"
+                         f"Error: {type(e).__name__}: {str(e)[:200]}\n"
+                         "Mientras tanto no vas a recibir avisos. Te escribo cuando se arregle.")
+            except Exception:
+                pass
+        raise
+    if fallas:
+        if fallas >= FALLAS_PARA_AVISAR:
+            telegram("✅ El aviso de correo volvió a funcionar.")
+        guardar(fallas=0)
+
+
 if __name__ == "__main__":
-    main()
+    vigilar()
